@@ -6,18 +6,23 @@ import org.springframework.integration.annotation.InboundChannelAdapter;
 import org.springframework.integration.annotation.Poller;
 import org.springframework.integration.annotation.ServiceActivator;
 import org.springframework.integration.channel.DirectChannel;
+import org.springframework.integration.core.MessageProducer;
 import org.springframework.integration.core.MessageSource;
 import org.springframework.integration.dsl.IntegrationFlow;
 import org.springframework.integration.dsl.IntegrationFlows;
 import org.springframework.integration.dsl.RouterSpec;
 import org.springframework.integration.dsl.support.Consumer;
+import org.springframework.integration.file.DefaultFileNameGenerator;
 import org.springframework.integration.file.FileReadingMessageSource;
+import org.springframework.integration.file.FileWritingMessageHandler;
 import org.springframework.integration.file.filters.SimplePatternFileListFilter;
+import org.springframework.integration.file.support.FileExistsMode;
 import org.springframework.integration.mqtt.core.DefaultMqttPahoClientFactory;
 import org.springframework.integration.mqtt.core.MqttPahoClientFactory;
+import org.springframework.integration.mqtt.inbound.MqttPahoMessageDrivenChannelAdapter;
 import org.springframework.integration.mqtt.outbound.MqttPahoMessageHandler;
+import org.springframework.integration.mqtt.support.DefaultPahoMessageConverter;
 import org.springframework.integration.router.ExpressionEvaluatingRouter;
-import org.springframework.integration.router.HeaderValueRouter;
 import org.springframework.integration.splitter.AbstractMessageSplitter;
 import org.springframework.integration.transformer.AbstractPayloadTransformer;
 import org.springframework.messaging.*;
@@ -53,9 +58,9 @@ public class SpringBootApplication {
 
 
     @Bean
-    public IntegrationFlow myFlow() {
+    public IntegrationFlow outputFlow() {
         return IntegrationFlows.from("fileInputChannel")
-                .transform(transformer())
+                .transform(temperatureSensorToTemperatureAndDateTransformer())
                 .channel(mqttOutboundChannel())
                 .split(messageSplitter())
                 .route("headers['topic']", new Consumer<RouterSpec<ExpressionEvaluatingRouter>>() {
@@ -125,6 +130,7 @@ public class SpringBootApplication {
         return new DirectChannel();
     }
 
+
     @Bean
     public MqttPahoClientFactory mqttClientFactory() {
         DefaultMqttPahoClientFactory factory = new DefaultMqttPahoClientFactory();
@@ -152,7 +158,7 @@ public class SpringBootApplication {
     }
 
     @Bean
-    AbstractPayloadTransformer transformer(){
+    public AbstractPayloadTransformer temperatureSensorToTemperatureAndDateTransformer(){
         return new AbstractPayloadTransformer<File, String >(){
             protected String transformPayload(File var1) throws Exception{
                 String temp =  new String(Files.readAllBytes(var1.toPath()));
@@ -168,5 +174,70 @@ public class SpringBootApplication {
 
         };
     }
+
+    //=================================================
+    //flow
+    @Bean
+    public IntegrationFlow inputFlow(){
+        return IntegrationFlows.from(alertInputChannelFromMqtt())
+                .transform(mqttAlertFormatToGpioFormat())
+                .channel(alertInputChannelFromTransformerToGpio())
+                .handle(fileWritingMessageHandler())
+                .get();
+    }
+
+
+    @Bean
+    public MessageChannel alertInputChannelFromMqtt(){
+        return new DirectChannel();
+    }
+
+    @Bean
+    public MessageChannel alertInputChannelFromTransformerToGpio(){
+        return new DirectChannel();
+    }
+
+    @Bean
+    public AbstractPayloadTransformer<String, String> mqttAlertFormatToGpioFormat(){
+        return new AbstractPayloadTransformer<String, String>() {
+            @Override
+            protected String transformPayload(String s) throws Exception {
+                if("on".equals(s)){
+                    return "1";
+                } else {
+                    return "0";
+                }
+            }
+        };
+    }
+
+    //source
+
+    @Bean
+    public MessageProducer inbound() {
+        MqttPahoMessageDrivenChannelAdapter adapter =
+                new MqttPahoMessageDrivenChannelAdapter("team2client", mqttClientFactory(),
+                        "bdch/bern/+/alert");
+        adapter.setCompletionTimeout(10000);
+        adapter.setConverter(new DefaultPahoMessageConverter());
+        adapter.setQos(1);
+        adapter.setOutputChannel(alertInputChannelFromMqtt());
+        return adapter;
+    }
+    //sink
+    @Bean
+    public FileWritingMessageHandler fileWritingMessageHandler(){
+       FileWritingMessageHandler fileWritingMessageHandler = new FileWritingMessageHandler(new File("/sys/class/gpio/gpio18/"));
+       fileWritingMessageHandler.setFileExistsMode(FileExistsMode.APPEND);
+       fileWritingMessageHandler.setAppendNewLine(true);
+       fileWritingMessageHandler.setExpectReply(false);
+            fileWritingMessageHandler.setFileNameGenerator(new DefaultFileNameGenerator(){
+                @Override
+                public String generateFileName(Message<?> message) {
+                    return "value";
+                }
+            });
+        return fileWritingMessageHandler;
+        }
 
 }
